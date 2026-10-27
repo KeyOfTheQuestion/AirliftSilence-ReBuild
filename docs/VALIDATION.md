@@ -31,7 +31,7 @@ this session; its path has offline guard coverage, not a new device result.
 
 ## Repository checks
 
-2026-10-27: all 11 tests passed locally with Python 3.12.13 on the Mac above,
+2026-10-27: all 12 tests passed locally with Python 3.12.13 on the Mac above,
 including both synthetic Core Audio tests. Skill format, launcher syntax,
 installer overwrite protection and README local links were also checked.
 No connected-device operation was run for these checks.

@@ -58,8 +58,15 @@ class WorkflowTests(unittest.TestCase):
     def test_missing_second_file_blocks_before_any_backend_load(self):
         self.fill()
         (self.store.root / "silent" / c.NAMES[1]).unlink()
-        with patch.object(c, "load_backend") as loader:
+        with patch.object(c.sys, "platform", "darwin"), patch.object(c, "load_backend") as loader:
             with self.assertRaises(FileNotFoundError):
+                c.main(["silence", "--state-dir", str(self.store.root)])
+            loader.assert_not_called()
+
+    def test_non_macos_blocks_device_operations_before_loading_backend(self):
+        self.fill()
+        with patch.object(c.sys, "platform", "linux"), patch.object(c, "load_backend") as loader:
+            with self.assertRaisesRegex(RuntimeError, "requires macOS"):
                 c.main(["silence", "--state-dir", str(self.store.root)])
             loader.assert_not_called()
 
