@@ -1,0 +1,2 @@
+# Version used for the 2026-10-26 iPhone 14 Pro / iOS 18.7.2 validation.
+pymobiledevice3==11.32.0

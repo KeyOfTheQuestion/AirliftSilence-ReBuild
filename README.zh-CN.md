@@ -1,118 +1,103 @@
 [English](README.md) · **简体中文**
 
-# AirliftSilence
+# AirliftSilence-ReBuild
 
-一键开关 iPhone 的「通话录音」提示音（"本次通话正在被录音"）。
+静音 iPhone 系统通话录音开始/结束提示音：保留上游 Windows GUI，新增可复用的 **macOS Agent 技能与操作流程**。
 
-基于 [airlift](https://github.com/0xjohnnydev/airlift) 的 AirTraffic 沙盒逃逸做的一个 Windows 小工具：
-把 iOS 在录音开始、结束时会播放的两个音频文件换成等长静音文件，随时可以还原。
+本 fork 整理了 2026-10-26 的真实操作：iPhone 14 Pro / iOS 18.7.2，用户实际通话确认提示音已经消失。新增设备绑定、原件落盘保护、按设备生成静音、读回校验，以及提示音恢复后的再次应用入口。**尚未验证重启后的持久性**；本次仓库整理未重新操作手机。详见[验证记录](docs/VALIDATION.md)。
 
-> [!NOTE]
-> 本项目大量借助 AI 完成，并且建立在其他人的工作之上 —— 见[致谢](#致谢)。
+## 给 Agent 使用
 
-## 环境要求
+让 Agent 克隆仓库，读取 [AGENTS.md](AGENTS.md) 和 [iphone-call-silence 技能](skills/iphone-call-silence/SKILL.md)，例如：
 
-- Windows（漏洞需要 `AirTrafficHost.dll`，由 Apple 的软件提供）
-- 已安装 64 位 iTunes 或 Apple Mobile Device Support
-- iPhone 用数据线连接、解锁，并已点击「信任此电脑」
+> 使用这个仓库里的 iphone-call-silence 技能检查我的 iPhone；符合已验证环境时，先备份，再取消通话录音提示音。
 
-已在 **iOS 27.0.1 (24A446)** 上完整验证 —— 读取、替换、还原全部通过，并且**重启后依然有效**。
-iOS 27.0 (24A437) 应该也可以；更早的版本没有测试过。
-
-## 快速开始
-
-### 直接下载 exe
-
-到 [Releases](../../releases) 下载 `AirliftSilence.exe`，插上 iPhone、解锁，然后点按钮即可。
-目标电脑不需要安装 Python。
-
-「① 检查设备」查找手机并触发信任弹窗 ·
-「② 去除提示音」备份原文件并写入静音文件 ·
-「③ 恢复提示音」把原文件放回去。
-
-每一步都会**把文件读回本地校验**，所以失败会明确报错，而不是假装成功。
-原版备份存放在 `%LOCALAPPDATA%\AirliftSilence\backup\`。
-
-### 从源码运行
+安装到 Codex 的技能目录，并与仓库保持链接：
 
 ```sh
-pip install pymobiledevice3
-python airlift_gui.py          # 图形界面
-python airlift.py              # 命令行，直接运行会打印用法
+python3 tools/install_skill.py
 ```
 
-自己打包 exe：
+安装器不会覆盖已有同名技能。其他 Agent 可通过 `--target /你的Agent/skills/iphone-call-silence` 指定位置。如果安装工具只复制技能目录，仍需保留完整仓库，并向 Agent 提供仓库路径或设置 `AIRLIFT_REPO`。
+
+## macOS 快速开始
+
+封装工作流目前只接受实测组合 **iPhone15,2 / iOS 18.7.2 / 22H124**。这是本工作流的验证边界，不代表上游漏洞的完整兼容范围。
+
+需要 Python 3.12、macOS 自带 Apple 框架与音频工具，以及 USB 连接、已解锁且信任此电脑的 iPhone。无需在手机安装 App、签名或配置 VPN。
 
 ```sh
-pip install pyinstaller
-pyinstaller --onefile --windowed --name AirliftSilence \
-  --add-data "silent/StartDisclosureWithTone.m4a;silent" \
-  --add-data "silent/StopDisclosure.caf;silent" \
-  airlift_gui.py
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python tools/call_silence.py doctor
 ```
 
-## 改动了哪两个文件
-
-| 文件 | 作用 | 替换成的静音文件 |
-|---|---|---|
-| `/var/mobile/Library/CallServices/Greetings/default/StartDisclosureWithTone.m4a` | 录音开始时播放 | AAC 44.1 kHz 单声道，时长同样 1.834 秒 |
-| `/var/mobile/Library/CallServices/Greetings/default/StopDisclosure.caf` | 录音结束时播放 | PCM s16le 48 kHz 单声道，时长同样 1.770 秒 |
-
-两个静音文件都是用 ffmpeg 的 `anullsrc` 生成的，就是纯数字静音，没有别的东西。
-时长和原文件对齐，所以播放时机不会变。
-
-录音开始时那段提示音，**通话双方都能听到**，而且长时间录音时可能还会重复播放。
-去掉它，就意味着对方不再被告知自己正在被录音。
-
-### 替换是怎么实现的
-
-AirTraffic 的 `moveItemAtPath:toPath:` 不允许覆盖已存在的文件，所以"替换"实际上是
-**先把旧文件搬到 Media，再通过搬过去的软链接写入新文件**。`airlift.py replace` 就是这么做的，
-而且**只有在旧文件被成功读回本地之后才会删除它** —— 万一读回失败，原文件会留在 Media 里而不是被销毁。
-
-## Grappa 修复（iOS 27.0.1）
-
-airlift 系的所有工具在 iOS 27.0.1 上都失效了，报错只有一句 `SyncFailed {ErrorCode: 4}`。
-设备自己的日志才说得出原因：
-
-```
-atc{AirTrafficDevice} <ERROR>: Grappa session could not be established. Aborting
-```
-
-设备会在 `Capabilities` 消息里通告 `GrappaSupportInfo`，然后拒绝任何 `HostInfo` 中
-不带 Grappa 会话的同步请求。而 Apple 的 `AirTrafficHost.dll` 自己**不会**建立这个会话
-（`ATHostConnectionGetGrappaSessionId` 返回 0）—— 它期望由调用方来驱动。
-
-这些令牌**不是每台设备一份**：它们是为 `(version=1, deviceType=0, protocolVersion=1)`
-预生成的客户端令牌，而这正是 iOS 27 设备广播的参数。
-[AirCard-iOS](https://github.com/Mak5er/AirCard-iOS) 公开了 10 个，`airlift.py` 里的
-`GRAPPA_TOKENS` 用的就是它们；在 24A446 上第一个就够了。
-
-所以说，**27.0.1 并没有修掉这个漏洞** —— 它只是加了一道锁，而钥匙是通用的。
-
-## 命令行
+手机当前仍有原始提示音时，逐步执行；上一步成功后再继续：
 
 ```sh
-python airlift.py write   <ios_path> <local_file>              # 写入新文件
-python airlift.py read    <ios_path> <output_file>             # 读取文件（会移出再移回）
-python airlift.py replace <ios_path> <local_file> [--backup P]  # 覆盖已存在的文件
+.venv/bin/python -u tools/call_silence.py canary
+.venv/bin/python -u tools/call_silence.py backup
+.venv/bin/python -u tools/call_silence.py generate
+.venv/bin/python -u tools/call_silence.py silence
 ```
 
-`--device UDID` 跳过设备选择，`--logging` 打印过程日志。
+**`backup` 和 `verify` 会把文件移出后写回，并非只读操作。** `doctor` 不修改提示音；`generate` 与 `check-files` 只处理本机文件。设备操作完成前保持手机连接。
+
+已经使用旧版 `local_audio.py` 静音过的手机，请迁移原先保存的原件，不要把当前静音文件重新当作原件备份。详见[完整流程与迁移说明](docs/AGENT-WORKFLOW.zh-CN.md)。
+
+### 重启后提示音又出现
+
+保留本机状态目录，连接并解锁同一部手机，然后双击 `再次取消录音提示音.command`，或执行：
+
+```sh
+.venv/bin/python tools/call_silence.py check-files
+.venv/bin/python tools/call_silence.py doctor
+.venv/bin/python -u tools/call_silence.py silence
+```
+
+两个文件均输出 `verified` 且进程成功退出，才表示文件校验通过；之后仍需实际通话试录确认。恢复原提示音使用 `restore` 或双击 `恢复录音提示音.command`。
+
+默认私有状态目录 `.airlift-local/` 包含原件、哈希、设备身份、配对缓存和回收快照，已加入 Git 忽略。**保留并私下备份，不能上传。** 更换手机或系统构建号不符时会停止；多设备须分别使用自己的 `--state-dir`。
+
+## 原版 Windows GUI
+
+Windows 安装 64 位 iTunes / Apple Mobile Device Support 后，仍可运行原 GUI：
+
+```sh
+python -m pip install -r requirements.txt
+python airlift_gui.py
+```
+
+本 fork 未重新验证 Windows。上游作者报告在 iOS 27.0.1（24A446）上测试通过；上游 exe 请到[原项目 Releases](https://github.com/YiHoooong/AirliftSilence/releases) 获取，它不是此 fork 新构建的二进制。
+
+根目录 `silent/` 是上游示例资源。Agent 工作流不使用这些示例，而是从本机原件生成静音件。低层 `airlift.py` CLI 用于研究，不具备封装流程的设备绑定与本地备份完整性检查。
+
+## 范围与失败处理
+
+封装只操作两份提示音：
+
+- `/var/mobile/Library/CallServices/Greetings/default/StartDisclosureWithTone.m4a`
+- `/var/mobile/Library/CallServices/Greetings/default/StopDisclosure.caf`
+
+长录音的周期提醒声可能保留。系统可能重新生成提示音，因此不承诺永久关闭。任一步报错，停止连续重试，保留本机回收副本和设备 Media 残留，按[失败处理说明](docs/AGENT-WORKFLOW.zh-CN.md#恢复与失败处理)调查。工具基于真实的沙盒逃逸，操作中断可能导致文件移位或不完整。
+
+这些语音原本会告知通话双方正在录音，使用者应取得所需同意。工具不会代拨电话，也不会永久改变系统录音规则。
+
+## 开发验证
+
+```sh
+python3.12 -m unittest discover -s tests -v
+```
+
+离线保护测试和 macOS AAC/Opus 合成音频测试均不连接手机。CI 在 Linux、macOS 上运行；无法使用 Core Audio 时跳过音频编码测试。
 
 ## 致谢
 
-- [airlift](https://github.com/0xjohnnydev/airlift) —— Johnny Franks：最初的 macOS PoC，
-  以及这一切所依赖的 ATAirlock 分析
-- [airlift-windows](https://github.com/DahanGuy/airlift-windows) —— Guy Dahan：用 ctypes 调用
-  `AirTrafficHost.dll` 的 Windows 移植版，本仓库 fork 自它
-- [AirCard-iOS](https://github.com/Mak5er/AirCard-iOS) —— Mak5er：Grappa 客户端令牌和修复思路的来源
-- [bl_sbx](https://github.com/h2zi/bl_sbx) —— 替换这两个文件的先行者
+- [airlift](https://github.com/0xjohnnydev/airlift)，Johnny Franks：AirTraffic / ATAirlock 研究与原始 macOS PoC。
+- [airlift-windows](https://github.com/DahanGuy/airlift-windows)，Guy Dahan：Windows ctypes 移植。
+- [AirliftSilence](https://github.com/YiHoooong/AirliftSilence)，YiHoooong：提示音替换 GUI 与 Grappa 会话修复。
+- [ios-calltone-silence](https://github.com/jiutinglifeng/ios-calltone-silence)，jiutinglifeng：macOS 框架加载和设备探测修复；纳入的提交为 `67582b82ec6d16d596085bc1cd142ec59350ea10`。
+- [AirCard-iOS](https://github.com/Mak5er/AirCard-iOS)：Grappa 令牌与协议工作。
+- [bl_sbx](https://github.com/h2zi/bl_sbx)：提示音替换先行工作。
 
-## 法律
-
-在要求**双方同意**才能录音的法域（德国、美国部分州等），去掉这个提示音可能违法。
-无论你的手机是否播报告知，录音相关的法律都适用于你 —— 录音前请先取得对方同意。
-
-这是一个针对自有设备做安全研究的概念验证工具。它利用的是真实的 iOS 漏洞，
-Apple 随时可以修复，而且这些文件也可能在未来的 iOS 更新中被还原。
+MIT，见 [LICENSE](LICENSE)。

@@ -1,122 +1,101 @@
 **English** · [简体中文](README.zh-CN.md)
 
-# AirliftSilence
+# AirliftSilence-ReBuild
 
-One-click switch for the iPhone call-recording announcement ("this call is being recorded").
+Silence the iPhone call-recording start/stop announcements, with an upstream Windows GUI and a reusable **macOS Agent skill**.
 
-A small Windows GUI on top of the [airlift](https://github.com/0xjohnnydev/airlift) AirTraffic
-sandbox escape. It replaces the two audio files iOS plays when call recording starts and stops
-with silent stand-ins, and can put the originals back.
+This fork adds the workflow used on an iPhone 14 Pro / iOS 18.7.2: device-bound backups, durable recovery copies, device-specific silent audio, readback checks, and a documented way to reapply the change. The user confirmed the result in an actual call on 2026-10-26. Reboot persistence has not been tested. See [validation evidence](docs/VALIDATION.md).
 
-> [!NOTE]
-> Built with heavy AI assistance, and standing on other people's work — see [Credits](#credits).
+## Use with an Agent
 
-## Requirements
+Ask your Agent to clone this repository and read [AGENTS.md](AGENTS.md) and [the skill](skills/iphone-call-silence/SKILL.md):
 
-- Windows (the exploit needs `AirTrafficHost.dll`, which ships with Apple's software)
-- 64-bit iTunes or Apple Mobile Device Support installed
-- A paired iPhone over USB, unlocked, with "Trust This Computer" accepted
+> Use this repository's iphone-call-silence skill to check my iPhone and, if it matches the validated setup, silence the call-recording announcements with a backup.
 
-Verified end to end on **iOS 27.0.1 (24A446)** — read, replace, restore, and it survives a reboot.
-iOS 27.0 (24A437) should work; older versions are untested.
-
-## Quick start
-
-### Standalone executable
-
-Download `AirliftSilence.exe` from [Releases](../../releases), plug in the iPhone, unlock it, and
-press the buttons. No Python required on the target machine.
-
-`① Check device` finds the phone and triggers the trust prompt ·
-`② Remove sound` backs up the originals and writes the silent files ·
-`③ Restore sound` puts the originals back.
-
-Every step is verified by reading the file back off the device, so a failure is reported instead of
-being silently ignored. Backups live in `%LOCALAPPDATA%\AirliftSilence\backup\`.
-
-### From source
+To install the skill into Codex while keeping it linked to the clone:
 
 ```sh
-pip install pymobiledevice3
-python airlift_gui.py          # GUI
-python airlift.py              # CLI, prints usage
+python3 tools/install_skill.py
 ```
 
-Building the exe:
+The installer preserves existing skills and refuses to overwrite a same-named personal skill. Use `--target /your/agent/skills/iphone-call-silence` for another location. If a skill installer copies only the skill folder, keep a full clone too and tell the Agent its path or set `AIRLIFT_REPO`.
+
+## macOS quick start
+
+The guarded Agent workflow currently accepts **iPhone15,2 / iOS 18.7.2 / 22H124** only. This is its real-device evidence boundary, not the full upstream exploit compatibility range. It requires Python 3.12, macOS's Apple private framework and audio tools, and an unlocked, trusted iPhone connected over USB.
 
 ```sh
-pip install pyinstaller
-pyinstaller --onefile --windowed --name AirliftSilence \
-  --add-data "silent/StartDisclosureWithTone.m4a;silent" \
-  --add-data "silent/StopDisclosure.caf;silent" \
-  airlift_gui.py
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python tools/call_silence.py doctor
 ```
 
-## What it touches
-
-| File | Role | Silent stand-in |
-|---|---|---|
-| `/var/mobile/Library/CallServices/Greetings/default/StartDisclosureWithTone.m4a` | played when recording starts | AAC 44.1 kHz mono, same 1.834 s duration |
-| `/var/mobile/Library/CallServices/Greetings/default/StopDisclosure.caf` | played when recording stops | PCM s16le 48 kHz mono, same 1.770 s duration |
-
-Both stand-ins are generated from `anullsrc` with ffmpeg — plain digital silence, nothing else. The
-durations match the originals so playback timing is unchanged.
-
-iOS plays the start announcement to **both parties** on the call, and may repeat it during a long
-recording. Removing it means the other party is no longer told they are being recorded.
-
-### How the swap works
-
-AirTraffic's `moveItemAtPath:toPath:` refuses to overwrite an existing file, so a replacement is
-"move the old file out to Media, then write the new one through the relocated link". `airlift.py
-replace` does exactly that, and only deletes the old copy once it has been read back — a failed
-readback leaves the original in Media rather than destroying it.
-
-## The Grappa fix (iOS 27.0.1)
-
-Every airlift-family tool stopped working on iOS 27.0.1 with nothing but
-`SyncFailed {ErrorCode: 4}`. The device's own log says why:
-
-```
-atc{AirTrafficDevice} <ERROR>: Grappa session could not be established. Aborting
-```
-
-The device advertises `GrappaSupportInfo` in its `Capabilities` message and then refuses any sync
-whose `HostInfo` carries no `Grappa` session. Apple's `AirTrafficHost.dll` does not establish one on
-its own (`ATHostConnectionGetGrappaSessionId` returns 0) — the caller is expected to drive it.
-
-The tokens are **not device-specific**: they are pre-generated client tokens for
-`(version=1, deviceType=0, protocolVersion=1)`, which is what iOS 27 devices advertise. Ten of them
-are published in [AirCard-iOS](https://github.com/Mak5er/AirCard-iOS) and are what `GRAPPA_TOKENS`
-in `airlift.py` uses; the first one is enough for 24A446.
-
-So 27.0.1 did not remove the vulnerability — it added a check that ships with a reusable key.
-
-## CLI
+For a phone that still has its original announcements, run each step only after the preceding one succeeds:
 
 ```sh
-python airlift.py write   <ios_path> <local_file>              # write a new file
-python airlift.py read    <ios_path> <output_file>             # read a file (moves it out and back)
-python airlift.py replace <ios_path> <local_file> [--backup P]  # overwrite an existing file
+.venv/bin/python -u tools/call_silence.py canary
+.venv/bin/python -u tools/call_silence.py backup
+.venv/bin/python -u tools/call_silence.py generate
+.venv/bin/python -u tools/call_silence.py silence
 ```
 
-`--device UDID` skips the device picker, `--logging` prints progress.
+`backup` and `verify` **move files out and back**; they are not read-only. `doctor` does not modify announcement audio. `generate` and `check-files` work only on local files. Keep the phone connected until device operations finish.
+
+If you already used the earlier local wrapper, import its known originals instead of backing up an already-silenced phone. See [the full workflow and migration instructions](docs/AGENT-WORKFLOW.zh-CN.md).
+
+### Reapply after announcements return
+
+With the same phone and original local state, double-click `再次取消录音提示音.command`, or run:
+
+```sh
+.venv/bin/python tools/call_silence.py check-files
+.venv/bin/python tools/call_silence.py doctor
+.venv/bin/python -u tools/call_silence.py silence
+```
+
+Both files must report `verified`, and the process must exit successfully. Then confirm with an actual call. Restore the original audio with `restore` or `恢复录音提示音.command`.
+
+All per-device state lives in ignored `.airlift-local/`. It includes originals, hashes, private device identity, pairing cache and recovery snapshots. **Keep it private and backed up.** A different phone or iOS build is rejected. For multiple devices, use a separate `--state-dir` for every command.
+
+## Upstream Windows GUI
+
+The original `airlift_gui.py` remains available on Windows with 64-bit iTunes / Apple Mobile Device Support installed:
+
+```sh
+python -m pip install -r requirements.txt
+python airlift_gui.py
+```
+
+This fork has not newly validated Windows. The upstream author reported iOS 27.0.1 (24A446) testing. Upstream executable releases belong to [AirliftSilence](https://github.com/YiHoooong/AirliftSilence/releases), not to a new binary produced by this fork.
+
+Root `silent/` contains upstream example assets. The Agent workflow generates its own files from the phone's originals and does not use those examples. The low-level `airlift.py` CLI is for research; it does not provide the wrapper's enrollment and local backup-integrity checks.
+
+## Limits and recovery
+
+Only these two files are targeted by the guarded workflow:
+
+- `/var/mobile/Library/CallServices/Greetings/default/StartDisclosureWithTone.m4a`
+- `/var/mobile/Library/CallServices/Greetings/default/StopDisclosure.caf`
+
+Periodic reminders during long recordings may remain. iOS can regenerate announcements, so the change is not guaranteed permanent. On any error, stop repeated attempts and preserve both local recovery copies and device Media artifacts; see [failure handling](docs/AGENT-WORKFLOW.zh-CN.md#恢复与失败处理). The tool is based on a real sandbox escape; an interrupted operation can leave files moved or incomplete.
+
+The announcements normally inform both call participants. Obtain any required consent before recording. This project does not place calls or make a permanent change to recording policy.
+
+## Development checks
+
+```sh
+python3.12 -m unittest discover -s tests -v
+```
+
+Offline guard tests and macOS synthetic AAC/Opus tests never connect to a phone. CI runs them on Linux and macOS; the audio test skips when Core Audio is unavailable.
 
 ## Credits
 
-- [airlift](https://github.com/0xjohnnydev/airlift) — Johnny Franks: the original macOS PoC and the
-  ATAirlock analysis this all rests on
-- [airlift-windows](https://github.com/DahanGuy/airlift-windows) — Guy Dahan: the Windows port using
-  `AirTrafficHost.dll` via ctypes, which this repository is forked from
-- [AirCard-iOS](https://github.com/Mak5er/AirCard-iOS) — Mak5er: where the Grappa client tokens and
-  the shape of the fix come from
-- [bl_sbx](https://github.com/h2zi/bl_sbx) — prior art for silencing these two files
+- [airlift](https://github.com/0xjohnnydev/airlift), Johnny Franks — AirTraffic / ATAirlock research and original macOS PoC.
+- [airlift-windows](https://github.com/DahanGuy/airlift-windows), Guy Dahan — Windows ctypes port.
+- [AirliftSilence](https://github.com/YiHoooong/AirliftSilence), YiHoooong — announcement replacement GUI and Grappa session fix.
+- [ios-calltone-silence](https://github.com/jiutinglifeng/ios-calltone-silence), jiutinglifeng — macOS framework loading and device detection fixes, incorporated from commit `67582b82ec6d16d596085bc1cd142ec59350ea10`.
+- [AirCard-iOS](https://github.com/Mak5er/AirCard-iOS) — Grappa tokens and protocol work.
+- [bl_sbx](https://github.com/h2zi/bl_sbx) — prior announcement replacement work.
 
-## Legal
-
-Removing the announcement may be illegal where call recording requires **all-party consent**
-(Germany, several US states, and others). Recording laws apply to you regardless of what your phone
-does or does not announce — get consent before recording anyone.
-
-This is a proof-of-concept for security research on hardware you own. It abuses a real iOS
-vulnerability; Apple can fix it at any time, and the files may be restored by a future iOS update.
+MIT. See [LICENSE](LICENSE).

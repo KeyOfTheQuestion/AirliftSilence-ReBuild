@@ -3,3 +3,13 @@ __pycache__/
 build/
 dist/
 *.spec
+.DS_Store
+.venv/
+.airlift-local/
+local-device/
+*.mobiledevicepairing
+*.mobilepairing
+*pairing*.plist
+backup/
+backups/
+*.log

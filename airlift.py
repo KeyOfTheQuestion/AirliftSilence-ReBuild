@@ -17,6 +17,7 @@ import sys
 import time
 import uuid
 import zipfile
+from pathlib import Path
 from typing import Any
 
 from pymobiledevice3.lockdown import create_using_usbmux
@@ -24,6 +25,9 @@ from pymobiledevice3.services.afc import AfcService
 from pymobiledevice3.usbmux import list_devices as list_mux_devices
 
 TESTED_BUILDS = frozenset({("27.0", "24A435"), ("27.0", "24A5390f")})
+if sys.platform == "darwin":
+    # This fork's real-device evidence is macOS-specific; see docs/VALIDATION.md.
+    TESTED_BUILDS |= frozenset({("18.7.2", "22H124")})
 AIRLOCK_ROOT = "/var/mobile/Media/Airlock/Book"
 SZ_EXTRA_ID = 0x5A53
 
@@ -55,10 +59,33 @@ GRAPPA_TOKENS = (
     "0101fc26f7e89d1635d86b5c886df69f526a0040038b6c33049f6bd5cc526b4ee7ccce614135d2c73f8326d9af6d28399a231510917493d4fdaa395b4d1c1e1b09bdf3fe6fb7e16ad6d5f5cc18b93730874e6f4e",
 )
 
+# ---------------------------------------------------------------------------
+# 平台相关的库路径
+#
+# 上游只支持 Windows：它按目录找 AirTrafficHost.dll，并用 Windows 专有的
+# os.add_dll_directory() 注册搜索路径。
+#
+# macOS 上这两个库以 framework 形式存在、符号完全一致，所以只需换掉
+# 「在哪找」和「怎么加载」，其余所有 ctypes 签名绑定（见下方 AppleCF）都是
+# 平台通用的。
+#
+# 此加载逻辑来自 jiutinglifeng 的 macOS 移植。
+# 本 fork 的 macOS 15.0.1 / arm64 验证记录见 docs/VALIDATION.md。
+# ---------------------------------------------------------------------------
+_MACOS = sys.platform == "darwin"
+
 APPLE_DLL_DIRS = (
     r"C:\Program Files\Common Files\Apple\Mobile Device Support",
     r"C:\Program Files\iTunes",
     r"C:\Program Files (x86)\Common Files\Apple\Mobile Device Support",
+)
+
+# CoreFoundation 在 macOS 上位于 dyld 共享缓存，os.path.isfile() 对它不可靠，
+# 必须交给 dyld 按名解析（ctypes.util.find_library 会给出正确路径）。
+MACOS_COREFOUNDATION = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+MACOS_AIRTRAFFICHOST_CANDIDATES = (
+    "/System/Library/PrivateFrameworks/AirTrafficHost.framework/Versions/Current/AirTrafficHost",
+    "/System/Library/PrivateFrameworks/AirTrafficHost.framework/AirTrafficHost",
 )
 
 class AirLiftError(RuntimeError):
@@ -74,20 +101,10 @@ def _log(msg: str):
 
 class AppleCF:
     def __init__(self):
-        dll_dir = None
-        for d in APPLE_DLL_DIRS:
-            if os.path.isfile(os.path.join(d, "AirTrafficHost.dll")):
-                dll_dir = d
-                break
-        if not dll_dir:
-            raise AirLiftError("iTunes not installed — need Apple Mobile Device Support DLLs")
-
-        for d in APPLE_DLL_DIRS:
-            if os.path.isdir(d):
-                os.add_dll_directory(d)
-
-        self.cf = ctypes.CDLL(os.path.join(dll_dir, "CoreFoundation.dll"))
-        self.at = ctypes.CDLL(os.path.join(dll_dir, "AirTrafficHost.dll"))
+        if _MACOS:
+            self.cf, self.at = self._load_macos()
+        else:
+            self.cf, self.at = self._load_windows()
 
         vp = ctypes.c_void_p
         for fn, ret, args in [
@@ -112,6 +129,49 @@ class AppleCF:
             if ret is not None:
                 fn.restype = ret
             fn.argtypes = args
+
+    @staticmethod
+    def _load_macos():
+        """加载 macOS 上的两个 framework。"""
+        import ctypes.util
+
+        chosen_cf = ctypes.util.find_library("CoreFoundation") or MACOS_COREFOUNDATION
+        try:
+            cf = ctypes.CDLL(chosen_cf)
+        except OSError as exc:
+            raise AirLiftError(f"could not load CoreFoundation ({chosen_cf}): {exc}")
+
+        at = None
+        for path in MACOS_AIRTRAFFICHOST_CANDIDATES:
+            try:
+                at = ctypes.CDLL(path)
+                break
+            except OSError:
+                continue
+        if at is None:
+            raise AirLiftError(
+                "could not load AirTrafficHost.framework —— "
+                "该框架在较旧的 macOS 上可能不存在"
+            )
+        return cf, at
+
+    @staticmethod
+    def _load_windows():
+        """加载 Windows 上的两个 DLL（上游原有逻辑，保持不动）。"""
+        dll_dir = None
+        for d in APPLE_DLL_DIRS:
+            if os.path.isfile(os.path.join(d, "AirTrafficHost.dll")):
+                dll_dir = d
+                break
+        if not dll_dir:
+            raise AirLiftError("iTunes not installed — need Apple Mobile Device Support DLLs")
+
+        for d in APPLE_DLL_DIRS:
+            if os.path.isdir(d):
+                os.add_dll_directory(d)
+
+        return (ctypes.CDLL(os.path.join(dll_dir, "CoreFoundation.dll")),
+                ctypes.CDLL(os.path.join(dll_dir, "AirTrafficHost.dll")))
 
     def cfstr(self, s: str):
         return self.cf.CFStringCreateWithCString(None, s.encode(), 0x08000100)
@@ -363,29 +423,84 @@ async def _cleanup(afc, src, lnk, rec, saved, saved_dirs):
     await asyncio.sleep(2)
     await _restore_books(afc, saved, saved_dirs)
 
+async def _usbmux_connect(**kwargs):
+    """统一的 usbmux 连接入口，支持自定义配对记录缓存目录。
+
+    pymobiledevice3 默认把配对记录放在 $HOME/.pymobiledevice3。若该路径不可写
+    （受限环境、只读 HOME、容器、沙箱等），它会抛
+    `PermissionError: Operation not permitted` —— 看起来像设备问题，实际是
+    写权限问题，很容易误判。
+
+    设环境变量 AIRLIFT_PAIRING_CACHE 可覆盖，例如：
+        AIRLIFT_PAIRING_CACHE=/tmp/pd3-pairing python airlift.py read ...
+    """
+    cache = os.environ.get("AIRLIFT_PAIRING_CACHE")
+    if cache:
+        Path(cache).mkdir(parents=True, exist_ok=True)
+        kwargs.setdefault("pairing_records_cache_folder", Path(cache))
+    return await create_using_usbmux(**kwargs)
+
+
 async def _resolve_device(requested: str | None = None):
     mux = await list_mux_devices()
     if not mux:
         raise AirLiftError("no USB devices found")
 
+    _resolve_errors: list[str] = []
+
     devices = []
     for md in mux:
         try:
-            ld = await create_using_usbmux(serial=md.serial)
-            pt = ld.product_type or ""
+            ld = await _usbmux_connect(serial=md.serial)
+
+            # --- 补丁开始：设备型号探测兼容新旧 pymobiledevice3 ---
+            # 上游原代码是 `pt = ld.product_type or ""`。但在 pymobiledevice3
+            # 11.x 里，lockdown 客户端**没有** product_type 这个属性（它只属于
+            # irecv 子系统），该行会抛 AttributeError，被下面那句
+            # `except Exception: continue` 静默吞掉 —— 结果是**每一台设备都被
+            # 跳过**，最终报出与实际原因无关的 "no paired iPhone found"。
+            # 这里改成三级兜底：属性 → all_values → get_value。
+            pt = getattr(ld, "product_type", None)
+            if not pt:
+                try:
+                    pt = (getattr(ld, "all_values", None) or {}).get("ProductType")
+                except Exception:
+                    pt = None
+            if not pt:
+                try:
+                    pt = await ld.get_value(key="ProductType")
+                except Exception:
+                    pt = None
+            pt = pt or ""
+            # --- 补丁结束 ---
+
             if not pt.startswith("iPhone"):
                 continue
-            ver = ld.product_version or "unknown"
+            ver = getattr(ld, "product_version", None)
+            if not ver:
+                try:
+                    ver = await ld.get_value(key="ProductVersion")
+                except Exception:
+                    ver = None
+            ver = ver or "unknown"
             bld = await ld.get_value(key="BuildVersion") or "unknown"
             nm = await ld.get_value(key="DeviceName") or pt
             devices.append({"udid": md.serial, "product": pt, "version": ver,
                             "build": bld, "name": nm,
                             "tested": (ver, bld) in TESTED_BUILDS, "lockdown": ld})
-        except Exception:
+        except Exception as exc:
+            # 上游这里是裸 `continue`，把真实原因静默吞掉，最终只报出一句
+            # 与实际原因无关的 "no paired iPhone found"。这个设计已经导致过
+            # 两次误判（product_type 属性不存在、Path 未导入），所以这里必须
+            # 把原因留下来。
+            _resolve_errors.append(f"{getattr(md, 'serial', '?')}: {type(exc).__name__}: {exc}")
             continue
 
     if not devices:
-        raise AirLiftError("no paired iPhone found")
+        detail = ""
+        if _resolve_errors:
+            detail = "\n每台设备的失败原因：\n  " + "\n  ".join(_resolve_errors)
+        raise AirLiftError("no paired iPhone found" + detail)
 
     if requested:
         for d in devices:

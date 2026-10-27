@@ -1,0 +1,4 @@
+interface:
+  display_name: "iPhone 通话录音提示音"
+  short_description: "通过 macOS 备份、重新静音或恢复 iPhone 通话录音提示音，保留本机原件与校验结果"
+  default_prompt: "使用 $iphone-call-silence 检查当前 iPhone，并按仓库中已验证的方法重新取消录音提示音。"
